@@ -76,6 +76,9 @@ pub enum ImageFormat {
 
     /// An Image in X BitMap Format
     Xbm,
+
+    /// An Image in X PixMap Format
+    Xpm,
 }
 
 impl ImageFormat {
@@ -116,6 +119,7 @@ impl ImageFormat {
                 "qoi" => ImageFormat::Qoi,
                 "pcx" => ImageFormat::Pcx,
                 "xbm" | "bm" => ImageFormat::Xbm,
+                "xpm" => ImageFormat::Xpm,
                 _ => return None,
             })
         }
@@ -193,6 +197,7 @@ impl ImageFormat {
             "image/x-qoi" => Some(ImageFormat::Qoi),
             "image/vnd.zbrush.pcx" | "image/x-pcx" => Some(ImageFormat::Pcx),
             "image/x-xbitmap" => Some(ImageFormat::Xbm),
+            "image/x-xpixmap" => Some(ImageFormat::Xpm),
             _ => None,
         }
     }
@@ -242,6 +247,7 @@ impl ImageFormat {
             ImageFormat::Farbfeld => "application/octet-stream",
             ImageFormat::Pcx => "image/vnd.zbrush.pcx",
             ImageFormat::Xbm => "image/x-xbitmap",
+            ImageFormat::Xpm => "image/x-xpixmap",
         }
     }
 
@@ -268,6 +274,7 @@ impl ImageFormat {
             ImageFormat::Qoi => true,
             ImageFormat::Pcx => true,
             ImageFormat::Xbm => true,
+            ImageFormat::Xpm => true,
         }
     }
 
@@ -294,6 +301,7 @@ impl ImageFormat {
             ImageFormat::Qoi => true,
             ImageFormat::Pcx => false,
             ImageFormat::Xbm => false,
+            ImageFormat::Xpm => false,
         }
     }
 
@@ -327,6 +335,7 @@ impl ImageFormat {
             ImageFormat::Qoi => &["qoi"],
             ImageFormat::Pcx => &["pcx"],
             ImageFormat::Xbm => &["xbm", "bm"],
+            ImageFormat::Xpm => &["xpm"],
         }
     }
 
@@ -352,6 +361,7 @@ impl ImageFormat {
             ImageFormat::Pcx => cfg!(feature = "pcx"),
             ImageFormat::Dds => false,
             ImageFormat::Xbm => cfg!(feature = "xbm"),
+            ImageFormat::Xpm => cfg!(feature = "xpm"),
         }
     }
 
@@ -377,6 +387,7 @@ impl ImageFormat {
             ImageFormat::Pcx => false,
             ImageFormat::Dds => false,
             ImageFormat::Xbm => false,
+            ImageFormat::Xpm => false,
         }
     }
 
@@ -400,6 +411,7 @@ impl ImageFormat {
             ImageFormat::Hdr,
             ImageFormat::Pcx,
             ImageFormat::Xbm,
+            ImageFormat::Xpm,
         ]
         .iter()
         .copied()

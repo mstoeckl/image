@@ -72,5 +72,9 @@ name = "fuzzer_script_xbm"
 path = "fuzzers/fuzzer_script_xbm.rs"
 
 [[bin]]
+name = "fuzzer_script_xpm"
+path = "fuzzers/fuzzer_script_xpm.rs"
+
+[[bin]]
 name = "roundtrip_webp"
 path = "fuzzers/roundtrip_webp.rs"

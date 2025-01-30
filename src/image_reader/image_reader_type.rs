@@ -181,6 +181,8 @@ impl<'a, R: 'a + BufRead + Seek> ImageReader<R> {
             ImageFormat::Pcx => Box::new(pcx::PCXDecoder::new(reader)?),
             #[cfg(feature = "xbm")]
             ImageFormat::Xbm => Box::new(xbm::XbmDecoder::new(reader)?),
+            #[cfg(feature = "xpm")]
+            ImageFormat::Xpm => Box::new(xpm::XpmDecoder::new(reader)?),
             format => {
                 return Err(ImageError::Unsupported(
                     ImageFormatHint::Exact(format).into(),

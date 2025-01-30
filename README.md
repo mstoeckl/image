@@ -60,9 +60,10 @@ image format encoders and decoders.
 | TIFF     | Yes                                       | Yes                                     |
 | WebP     | Yes                                       | Yes (lossless only)                     |
 | XBM      | Yes \*\*                                  | ---                                     |
+| XPM      | Yes \*\*                                  | ---                                     |
 
 - \* Requires the `avif-native` feature, uses the libdav1d C library.
-- \*\* `XBM` is disabled by default and requires the `xbm` feature.
+- \*\* XPM and XBM are obsolete formats and are disabled by default; use `xbm` and `xpm` features to enable.
 
 ## Image Types
 
