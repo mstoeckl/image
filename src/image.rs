@@ -13,6 +13,7 @@ use crate::error::{
     ImageError, ImageFormatHint, ImageResult, LimitError, LimitErrorKind, ParameterError,
     ParameterErrorKind, UnsupportedError, UnsupportedErrorKind,
 };
+use crate::hooks::decoding_hook_registered;
 use crate::math::Rect;
 use crate::metadata::Orientation;
 use crate::traits::Pixel;
@@ -73,6 +74,9 @@ pub enum ImageFormat {
 
     /// An Image in PCX Format
     Pcx,
+
+    /// An Image in X BitMap Format
+    Xbm,
 }
 
 impl ImageFormat {
@@ -112,6 +116,7 @@ impl ImageFormat {
                 "ff" => ImageFormat::Farbfeld,
                 "qoi" => ImageFormat::Qoi,
                 "pcx" => ImageFormat::Pcx,
+                "xbm" | "bm" => ImageFormat::Xbm,
                 _ => return None,
             })
         }
@@ -188,6 +193,7 @@ impl ImageFormat {
             // See: https://github.com/phoboslab/qoi/issues/167
             "image/x-qoi" => Some(ImageFormat::Qoi),
             "image/vnd.zbrush.pcx" | "image/x-pcx" => Some(ImageFormat::Pcx),
+            "image/x-xbitmap" => Some(ImageFormat::Xbm),
             _ => None,
         }
     }
@@ -236,6 +242,7 @@ impl ImageFormat {
             // farbfeld's MIME type taken from https://www.wikidata.org/wiki/Q28206109
             ImageFormat::Farbfeld => "application/octet-stream",
             ImageFormat::Pcx => "image/vnd.zbrush.pcx",
+            ImageFormat::Xbm => "image/x-xbitmap",
         }
     }
 
@@ -261,6 +268,7 @@ impl ImageFormat {
             ImageFormat::Avif => true,
             ImageFormat::Qoi => true,
             ImageFormat::Pcx => true,
+            ImageFormat::Xbm => true,
         }
     }
 
@@ -286,6 +294,7 @@ impl ImageFormat {
             ImageFormat::Dds => false,
             ImageFormat::Qoi => true,
             ImageFormat::Pcx => false,
+            ImageFormat::Xbm => false,
         }
     }
 
@@ -318,6 +327,7 @@ impl ImageFormat {
             ImageFormat::Avif => &["avif"],
             ImageFormat::Qoi => &["qoi"],
             ImageFormat::Pcx => &["pcx"],
+            ImageFormat::Xbm => &["xbm", "bm"],
         }
     }
 
@@ -342,6 +352,7 @@ impl ImageFormat {
             ImageFormat::Qoi => cfg!(feature = "qoi"),
             ImageFormat::Pcx => cfg!(feature = "pcx"),
             ImageFormat::Dds => false,
+            ImageFormat::Xbm => decoding_hook_registered(*self),
         }
     }
 
@@ -366,6 +377,7 @@ impl ImageFormat {
             ImageFormat::Hdr => cfg!(feature = "hdr"),
             ImageFormat::Pcx => false,
             ImageFormat::Dds => false,
+            ImageFormat::Xbm => false,
         }
     }
 
@@ -388,6 +400,7 @@ impl ImageFormat {
             ImageFormat::Dds,
             ImageFormat::Hdr,
             ImageFormat::Pcx,
+            ImageFormat::Xbm,
         ]
         .iter()
         .copied()
