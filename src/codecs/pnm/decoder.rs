@@ -684,17 +684,33 @@ impl<R: Read> PnmDecoder<R> {
     }
 }
 
-fn read_separated_ascii<T: FromStr<Err = ParseIntError>>(reader: &mut dyn Read) -> ImageResult<T>
+trait PnmDataInteger {}
+impl PnmDataInteger for u8 {}
+impl PnmDataInteger for u16 {}
+
+fn read_separated_ascii<T: PnmDataInteger + FromStr<Err = ParseIntError>>(
+    reader: &mut dyn Read,
+) -> ImageResult<T>
 where
     T::Err: Display,
 {
     let is_separator = |v: &u8| matches!(*v, b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r' | b' ');
 
-    let token = reader
-        .bytes()
-        .skip_while(|v| v.as_ref().ok().is_some_and(is_separator))
-        .take_while(|v| v.as_ref().ok().is_some_and(|c| !is_separator(c)))
-        .collect::<Result<Vec<u8>, _>>()?;
+    let mut token_buf = [0_u8; 8];
+    let mut token_len = 0;
+
+    // The loop will silently truncate long tokens, but this function will still reject
+    // them later because (even truncated) they cannot be parsed as u8 or u16
+    for (b, rc) in token_buf.iter_mut().zip(
+        reader
+            .bytes()
+            .skip_while(|v| v.as_ref().ok().is_some_and(is_separator))
+            .take_while(|v| v.as_ref().ok().is_some_and(|c| !is_separator(c))),
+    ) {
+        *b = rc?;
+        token_len += 1;
+    }
+    let token = &token_buf[..token_len];
 
     if !token.is_ascii() {
         return Err(DecoderError::NonAsciiSample.into());
@@ -703,6 +719,34 @@ where
     let string = str::from_utf8(&token)
         // We checked the precondition ourselves a few lines before with `token.is_ascii()`.
         .unwrap_or_else(|_| unreachable!("Only ASCII characters should be decoded"));
+
+    // ParseIntError does not have a public constructor, so use this workaround to create one
+    let invalid_digit_error = "?".parse::<u8>().unwrap_err();
+
+    // Validate first letter of string to filter out invalid integers like '+1' or '0001'.
+    if let Some(first) = string.chars().next() {
+        match first {
+            '0' => {
+                if string.len() > 1 {
+                    return Err(DecoderError::UnparsableValue(
+                        ErrorDataSource::Sample,
+                        string.to_owned(),
+                        invalid_digit_error,
+                    )
+                    .into());
+                }
+            }
+            '1'..='9' => (),
+            _ => {
+                return Err(DecoderError::UnparsableValue(
+                    ErrorDataSource::Sample,
+                    string.to_owned(),
+                    invalid_digit_error,
+                )
+                .into());
+            }
+        }
+    }
 
     string.parse().map_err(|err| {
         DecoderError::UnparsableValue(ErrorDataSource::Sample, string.to_owned(), err).into()
