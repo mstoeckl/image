@@ -7,8 +7,7 @@ use crate::{
     error::{ImageError, ImageResult, UnsupportedError, UnsupportedErrorKind},
     ImageDecoder, ImageFormat,
 };
-use byteorder_lite::ReadBytesExt;
-use std::io::{self, Read};
+use std::io::BufRead;
 
 struct ColorMap {
     /// sizes in bytes
@@ -77,7 +76,102 @@ impl TgaOrientation {
     }
 }
 
-impl<R: Read> TgaDecoder<R> {
+enum NextRequest {
+    /// Next run size is known; for TGA this will always be < 128*4+1 = 513 bytes.
+    KnownSize(usize),
+    /// Have not started next run, will need to read a single byte
+    Boundary,
+    /// End of image
+    Done,
+}
+
+/// Code decoding function, processes a prefix of a slice of bytes and
+/// communicates the next slice size it needs to continue.
+///
+/// Returns the unused slice, plus and either, if the slice ends at an RLE
+/// operation boundary, NextRequest::Boundary, or if the slice ends inside
+/// and RLE operation, NextRequest::KnownSize with the exact number of bytes
+/// used by the operation.
+///
+/// If performance improvements are needed, consider making T: Fn([u8; A], &mut [u8: B])
+/// and replacing `output` with an `&mut [[u8; B]]`
+fn try_decode_rle_slice<'a, 'b, T: Fn(&[u8], &mut [u8]) -> Result<(), &'static str>>(
+    mut input: &'a [u8],
+    mut output: &'b mut [u8],
+    raw_bytes_per_pixel: usize,
+    output_bytes_per_pixel: usize,
+    expand_pixel: T,
+) -> Result<(&'a [u8], &'b mut [u8], NextRequest), &'static str> {
+    let mut expanded_space = [0_u8; 4];
+    let expanded: &mut [u8] = &mut expanded_space[..output_bytes_per_pixel];
+
+    while let Some((run_packet, next_input)) = input.split_first() {
+        // If the highest bit in `run_packet` is set, then we repeat pixels
+        //
+        // Note: the TGA format adds 1 to both counts because having a count
+        // of 0 would be pointless.
+        let count = ((run_packet & !0x80) + 1) as usize;
+        let (next_input, next_output) = if (run_packet & 0x80) != 0 {
+            // high bit set, so we will repeat the data
+            let Some((raw_pixel, next_input)) = next_input.split_at_checked(raw_bytes_per_pixel)
+            else {
+                return Ok((
+                    input,
+                    output,
+                    NextRequest::KnownSize(1 + raw_bytes_per_pixel),
+                ));
+            };
+            let Some((run_pxs, next_output)) =
+                output.split_at_mut_checked(output_bytes_per_pixel * count)
+            else {
+                return Err("RLE decoding writes more pixels than image contains");
+            };
+
+            expand_pixel(raw_pixel, expanded)?;
+
+            for out_px in run_pxs.chunks_exact_mut(output_bytes_per_pixel) {
+                out_px.copy_from_slice(expanded);
+            }
+
+            (next_input, next_output)
+        } else {
+            // not set, so `run_packet+1` is the number of non-encoded pixels
+            let Some((raw_pixels, next_input)) =
+                next_input.split_at_checked(count * raw_bytes_per_pixel)
+            else {
+                return Ok((
+                    input,
+                    output,
+                    NextRequest::KnownSize(1 + count * raw_bytes_per_pixel),
+                ));
+            };
+
+            let Some((run_pxs, next_output)) =
+                output.split_at_mut_checked(output_bytes_per_pixel * count)
+            else {
+                return Err("RLE decoding writes more pixels than image contains");
+            };
+            for (out_px, raw_px) in run_pxs
+                .chunks_exact_mut(output_bytes_per_pixel)
+                .zip(raw_pixels.chunks_exact(raw_bytes_per_pixel))
+            {
+                expand_pixel(raw_px, out_px)?;
+            }
+
+            (next_input, next_output)
+        };
+
+        output = next_output;
+        input = next_input;
+
+        if output.is_empty() {
+            return Ok((input, output, NextRequest::Done));
+        }
+    }
+    Ok((input, output, NextRequest::Boundary))
+}
+
+impl<R: BufRead> TgaDecoder<R> {
     /// Create a new decoder that decodes from the stream `r`
     pub fn new(mut r: R) -> ImageResult<TgaDecoder<R>> {
         // Read header
@@ -212,44 +306,6 @@ impl<R: Read> TgaDecoder<R> {
         })
     }
 
-    /// Reads a run length encoded data for given number of bytes
-    fn read_encoded_data(&mut self, buf: &mut [u8]) -> io::Result<()> {
-        assert!(self.raw_bytes_per_pixel <= 4);
-        let mut repeat_buf = [0; 4];
-        let repeat_buf = &mut repeat_buf[..self.raw_bytes_per_pixel];
-
-        let mut index = 0;
-        while index < buf.len() {
-            let run_packet = self.r.read_u8()?;
-            // If the highest bit in `run_packet` is set, then we repeat pixels
-            //
-            // Note: the TGA format adds 1 to both counts because having a count
-            // of 0 would be pointless.
-            if (run_packet & 0x80) != 0 {
-                // high bit set, so we will repeat the data
-                let repeat_count = ((run_packet & !0x80) + 1) as usize;
-                self.r.read_exact(repeat_buf)?;
-
-                for chunk in buf[index..]
-                    .chunks_exact_mut(self.raw_bytes_per_pixel)
-                    .take(repeat_count)
-                {
-                    chunk.copy_from_slice(repeat_buf);
-                }
-                index += repeat_count * self.raw_bytes_per_pixel;
-            } else {
-                // not set, so `run_packet+1` is the number of non-encoded pixels
-                let num_raw_bytes =
-                    ((run_packet + 1) as usize * self.raw_bytes_per_pixel).min(buf.len() - index);
-
-                self.r.read_exact(&mut buf[index..][..num_raw_bytes])?;
-                index += num_raw_bytes;
-            }
-        }
-
-        Ok(())
-    }
-
     /// Expands indices into its mapped color
     fn expand_color_map(
         &self,
@@ -310,14 +366,14 @@ impl<R: Read> TgaDecoder<R> {
     }
 
     /// Change image orientation depending on the flags set
-    fn fixup_orientation(&mut self, pixels: &mut [u8]) {
+    fn fixup_orientation(&mut self, pixels: &mut [u8], bpp: usize) {
         let orientation = TgaOrientation::from_image_desc_byte(self.header.image_desc);
 
         // Flip image if bottom->top direction
         if (orientation == TgaOrientation::BottomLeft || orientation == TgaOrientation::BottomRight)
             && self.height > 1
         {
-            let row_stride = self.width * self.raw_bytes_per_pixel;
+            let row_stride = self.width * bpp;
 
             let (left_part, right_part) = pixels.split_at_mut(self.height / 2 * row_stride);
 
@@ -335,12 +391,11 @@ impl<R: Read> TgaDecoder<R> {
         if (orientation == TgaOrientation::BottomRight || orientation == TgaOrientation::TopRight)
             && self.width > 1
         {
-            for row in pixels.chunks_exact_mut(self.width * self.raw_bytes_per_pixel) {
-                let (left_part, right_part) =
-                    row.split_at_mut(self.width / 2 * self.raw_bytes_per_pixel);
+            for row in pixels.chunks_exact_mut(self.width * bpp) {
+                let (left_part, right_part) = row.split_at_mut(self.width / 2 * bpp);
                 for (src, dst) in left_part
-                    .chunks_exact_mut(self.raw_bytes_per_pixel)
-                    .zip(right_part.chunks_exact_mut(self.raw_bytes_per_pixel).rev())
+                    .chunks_exact_mut(bpp)
+                    .zip(right_part.chunks_exact_mut(bpp).rev())
                 {
                     for (src, dst) in src.iter_mut().zip(dst.iter_mut()) {
                         std::mem::swap(dst, src);
@@ -351,7 +406,7 @@ impl<R: Read> TgaDecoder<R> {
     }
 }
 
-impl<R: Read> ImageDecoder for TgaDecoder<R> {
+impl<R: BufRead> ImageDecoder for TgaDecoder<R> {
     fn dimensions(&self) -> (u32, u32) {
         (self.width as u32, self.height as u32)
     }
@@ -374,22 +429,112 @@ impl<R: Read> ImageDecoder for TgaDecoder<R> {
         // pixels they encode, so it is safe to read the raw data into `buf`.
         let num_raw_bytes = self.width * self.height * self.raw_bytes_per_pixel;
         if self.image_type.is_encoded() {
-            self.read_encoded_data(&mut buf[..num_raw_bytes])?;
+            let expand_pixel = |src: &[u8], dst: &mut [u8]| -> Result<(), &'static str> {
+                if let Some(ref color_map) = self.color_map {
+                    if self.raw_bytes_per_pixel == 1 {
+                        if let Some(color) = color_map.get(src[0] as usize) {
+                            dst.copy_from_slice(color);
+                        } else {
+                            return Err("Invalid color map index");
+                        }
+                    } else if self.raw_bytes_per_pixel == 2 {
+                        let index = u16::from_le_bytes(src.try_into().unwrap());
+                        if let Some(color) = color_map.get(index as usize) {
+                            dst.copy_from_slice(color);
+                        } else {
+                            return Err("Invalid color map index");
+                        }
+                    }
+                } else {
+                    dst.copy_from_slice(src);
+                }
+                Ok(())
+            };
+
+            // BufRead's API is flawed and makes the following logic rather convoluted, but if
+            // whatever provides BufRead has a large enough buffer, this should stay on the
+            // (zero-copy) fast path most of the time instead of doing the minimum possible
+            // reads into a cache on the stack.
+
+            let bpp = self.color_type.bytes_per_pixel();
+            let mut output: &mut [u8] = buf;
+
+            let mut min_wanted: usize = 1;
+            // The longest RLE operation is to copy 128 pixels
+            let mut slow_cache_data = [0_u8; 1 + 128 * 4];
+
+            loop {
+                let rbuf = self.r.fill_buf()?;
+                if rbuf.len() == 0 {
+                    if output.is_empty() {
+                        /* EOF coincides with end of image pixels */
+                        break;
+                    } else {
+                        return Err(ImageError::Decoding(DecodingError::new(
+                            ImageFormat::Tga.into(),
+                            "unexpected EOF",
+                        )));
+                    }
+                }
+
+                // If the previous call to try_decode_rle_slice() returned NextRequest::Boundary,
+                // then (assuming no EOF) rbuf.len() < min_wanted=1 will be false, and the fast
+                // path will be tried.
+                let slow_path = rbuf.len() < min_wanted;
+                let buf: &[u8] = if slow_path {
+                    // This uses a property of try_decode_rle_slice(); giving it a single
+                    // byte (which always uses the fast path) is enough to determine the exact
+                    // extent of the current run.
+                    assert!(min_wanted <= slow_cache_data.len());
+                    self.r.read_exact(&mut slow_cache_data[..min_wanted])?;
+                    &slow_cache_data[..min_wanted]
+                } else {
+                    rbuf
+                };
+
+                let buf_len = buf.len();
+                let (unused_buf, next_output, next_wanted) = try_decode_rle_slice(
+                    buf,
+                    output,
+                    self.raw_bytes_per_pixel,
+                    bpp as usize,
+                    expand_pixel,
+                )
+                .map_err(|s| {
+                    ImageError::Decoding(DecodingError::new(ImageFormat::Tga.into(), s))
+                })?;
+                output = next_output;
+                let bytes_used = buf_len - unused_buf.len();
+                min_wanted = match next_wanted {
+                    NextRequest::KnownSize(s) => s,
+                    NextRequest::Boundary => 1,
+                    // End of image occurred partway through buffer
+                    NextRequest::Done => break,
+                };
+
+                if slow_path {
+                    assert!(buf.len() == bytes_used);
+                } else {
+                    self.r.consume(bytes_used);
+                }
+            }
+
+            self.fixup_orientation(buf, bpp as usize);
         } else {
             self.r.read_exact(&mut buf[..num_raw_bytes])?;
-        }
 
-        self.fixup_orientation(&mut buf[..num_raw_bytes]);
+            self.fixup_orientation(&mut buf[..num_raw_bytes], self.raw_bytes_per_pixel);
 
-        // Expand the indices using the color map if necessary
-        if let Some(ref color_map) = self.color_map {
-            // This allocation could be avoided by expanding each row (or block of pixels) as it is
-            // read, or by doing the color map expansion in-place. But those may be more effort than
-            // it is worth.
-            let mut rawbuf = vec_try_with_capacity(num_raw_bytes)?;
-            rawbuf.extend_from_slice(&buf[..num_raw_bytes]);
+            // Expand the indices using the color map if necessary
+            if let Some(ref color_map) = self.color_map {
+                // This allocation could be avoided by expanding each row (or block of pixels) as it is
+                // read, or by doing the color map expansion in-place. But those may be more effort than
+                // it is worth.
+                let mut rawbuf = vec_try_with_capacity(num_raw_bytes)?;
+                rawbuf.extend_from_slice(&buf[..num_raw_bytes]);
 
-            self.expand_color_map(&rawbuf, buf, color_map)?;
+                self.expand_color_map(&rawbuf, buf, color_map)?;
+            }
         }
 
         self.reverse_encoding_in_output(buf);
