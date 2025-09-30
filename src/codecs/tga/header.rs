@@ -88,33 +88,31 @@ impl Header {
     ) -> ImageResult<Self> {
         let mut header = Self::default();
 
-        if width > 0 && height > 0 {
-            let (num_alpha_bits, other_channel_bits, image_type) = match (color_type, use_rle) {
-                (ExtendedColorType::Rgba8, true) => (8, 24, ImageType::RunTrueColor),
-                (ExtendedColorType::Rgb8, true) => (0, 24, ImageType::RunTrueColor),
-                (ExtendedColorType::La8, true) => (8, 8, ImageType::RunGrayScale),
-                (ExtendedColorType::L8, true) => (0, 8, ImageType::RunGrayScale),
-                (ExtendedColorType::Rgba8, false) => (8, 24, ImageType::RawTrueColor),
-                (ExtendedColorType::Rgb8, false) => (0, 24, ImageType::RawTrueColor),
-                (ExtendedColorType::La8, false) => (8, 8, ImageType::RawGrayScale),
-                (ExtendedColorType::L8, false) => (0, 8, ImageType::RawGrayScale),
-                _ => {
-                    return Err(ImageError::Unsupported(
-                        UnsupportedError::from_format_and_kind(
-                            ImageFormat::Tga.into(),
-                            UnsupportedErrorKind::Color(color_type),
-                        ),
-                    ))
-                }
-            };
+        let (num_alpha_bits, other_channel_bits, image_type) = match (color_type, use_rle) {
+            (ExtendedColorType::Rgba8, true) => (8, 24, ImageType::RunTrueColor),
+            (ExtendedColorType::Rgb8, true) => (0, 24, ImageType::RunTrueColor),
+            (ExtendedColorType::La8, true) => (8, 8, ImageType::RunGrayScale),
+            (ExtendedColorType::L8, true) => (0, 8, ImageType::RunGrayScale),
+            (ExtendedColorType::Rgba8, false) => (8, 24, ImageType::RawTrueColor),
+            (ExtendedColorType::Rgb8, false) => (0, 24, ImageType::RawTrueColor),
+            (ExtendedColorType::La8, false) => (8, 8, ImageType::RawGrayScale),
+            (ExtendedColorType::L8, false) => (0, 8, ImageType::RawGrayScale),
+            _ => {
+                return Err(ImageError::Unsupported(
+                    UnsupportedError::from_format_and_kind(
+                        ImageFormat::Tga.into(),
+                        UnsupportedErrorKind::Color(color_type),
+                    ),
+                ))
+            }
+        };
 
-            header.image_type = image_type as u8;
-            header.image_width = width;
-            header.image_height = height;
-            header.pixel_depth = num_alpha_bits + other_channel_bits;
-            header.image_desc = num_alpha_bits & ALPHA_BIT_MASK;
-            header.image_desc |= SCREEN_ORIGIN_BIT_MASK; // Upper left origin.
-        }
+        header.image_type = image_type as u8;
+        header.image_width = width;
+        header.image_height = height;
+        header.pixel_depth = num_alpha_bits + other_channel_bits;
+        header.image_desc = num_alpha_bits & ALPHA_BIT_MASK;
+        header.image_desc |= SCREEN_ORIGIN_BIT_MASK; // Upper left origin.
 
         Ok(header)
     }
