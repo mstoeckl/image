@@ -8,12 +8,12 @@ use std::{
     sync::RwLock,
 };
 
-use crate::{ImageDecoder, ImageResult};
+use crate::{ImageDecoder, ImageResult, Limits};
 
 pub(crate) trait ReadSeek: Read + Seek {}
 impl<T: Read + Seek> ReadSeek for T {}
 
-pub(crate) static DECODING_HOOKS: RwLock<Option<HashMap<OsString, DecodingHook>>> =
+pub(crate) static DECODING_HOOKS: RwLock<Option<HashMap<OsString, DecodingHookWithLimits>>> =
     RwLock::new(None);
 
 pub(crate) type DetectionHook = (&'static [u8], &'static [u8], OsString);
@@ -70,8 +70,37 @@ impl Seek for GenericReader<'_> {
 pub type DecodingHook =
     Box<dyn for<'a> Fn(GenericReader<'a>) -> ImageResult<Box<dyn ImageDecoder + 'a>> + Send + Sync>;
 
+/// A function to produce an `ImageDecoder` for a given image format and decoding limits.
+pub type DecodingHookWithLimits = Box<
+    dyn for<'a> Fn(GenericReader<'a>, Limits) -> ImageResult<Box<dyn ImageDecoder + 'a>>
+        + Send
+        + Sync,
+>;
+
 /// Register a new decoding hook or returns false if one already exists for the given format.
 pub fn register_decoding_hook(extension: OsString, hook: DecodingHook) -> bool {
+    let mut hooks = DECODING_HOOKS.write().unwrap();
+    if hooks.is_none() {
+        *hooks = Some(HashMap::new());
+    }
+    match hooks.as_mut().unwrap().entry(extension) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(Box::new(move |r, limits| {
+                let mut decoder = hook(r)?;
+                decoder.set_limits(limits)?;
+                ImageResult::Ok(decoder)
+            }));
+            true
+        }
+        std::collections::hash_map::Entry::Occupied(_) => false,
+    }
+}
+
+/// Register a new decoding hook or returns false if one already exists for the given format.
+pub fn register_decoding_hook_with_limits(
+    extension: OsString,
+    hook: DecodingHookWithLimits,
+) -> bool {
     let mut hooks = DECODING_HOOKS.write().unwrap();
     if hooks.is_none() {
         *hooks = Some(HashMap::new());

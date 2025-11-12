@@ -145,13 +145,14 @@ impl<'a, R: 'a + BufRead + Seek> ImageReader<R> {
 
     /// Makes a decoder.
     ///
-    /// For all formats except PNG, the limits are ignored and can be set with
-    /// `ImageDecoder::set_limits` after calling this function. PNG is handled specially because that
-    /// decoder has a different API which does not allow setting limits after construction.
+    /// For most formats, the limits are ignored and can be set with `ImageDecoder::set_limits`
+    /// after calling this function. The PNG decoder has a different API which requires limits
+    /// to be set before the image header is decoded; formats added through decoding hooks may
+    /// have similar constraints.
     fn make_decoder(
         format: Format,
         reader: R,
-        limits_for_png: Limits,
+        limits_for_header: Limits,
     ) -> ImageResult<Box<dyn ImageDecoder + 'a>> {
         #[allow(unused)]
         use crate::codecs::*;
@@ -163,7 +164,10 @@ impl<'a, R: 'a + BufRead + Seek> ImageReader<R> {
                     let hooks = DECODING_HOOKS.read().unwrap();
                     if let Some(hooks) = hooks.as_ref() {
                         if let Some(hook) = hooks.get(&ext) {
-                            return hook(GenericReader(BufReader::new(Box::new(reader))));
+                            return hook(
+                                GenericReader(BufReader::new(Box::new(reader))),
+                                limits_for_header,
+                            );
                         }
                     }
                 }
@@ -180,7 +184,7 @@ impl<'a, R: 'a + BufRead + Seek> ImageReader<R> {
             #[cfg(feature = "avif-native")]
             ImageFormat::Avif => Box::new(avif::AvifDecoder::new(reader)?),
             #[cfg(feature = "png")]
-            ImageFormat::Png => Box::new(png::PngDecoder::with_limits(reader, limits_for_png)?),
+            ImageFormat::Png => Box::new(png::PngDecoder::with_limits(reader, limits_for_header)?),
             #[cfg(feature = "gif")]
             ImageFormat::Gif => Box::new(gif::GifDecoder::new(reader)?),
             #[cfg(feature = "jpeg")]
