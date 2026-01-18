@@ -49,7 +49,6 @@ impl<R: io::Read> ReadExt for R {
 /// Describes a packed rectangular layout with given bit-depth in [`ImageDecoder::init`]. Layouts
 /// from `image` are row-major with no padding between rows and pixels packed by consecutive
 /// channels.
-#[non_exhaustive]
 pub struct ImageLayout {
     /// The color model of each pixel.
     pub color: crate::ColorType,
