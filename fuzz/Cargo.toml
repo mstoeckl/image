@@ -55,6 +55,10 @@ name = "fuzzer_script_bmp"
 path = "fuzzers/fuzzer_script_bmp.rs"
 
 [[bin]]
+name = "fuzzer_script_bmp_resumable"
+path = "fuzzers/fuzzer_script_bmp_resumable.rs"
+
+[[bin]]
 name = "fuzzer_script_ico"
 path = "fuzzers/fuzzer_script_ico.rs"
 
