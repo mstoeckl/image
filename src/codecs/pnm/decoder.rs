@@ -914,7 +914,7 @@ impl DecodableImageHeader for ArbitraryHeader {
             Some(ArbitraryTuplType::Grayscale) if self.depth == 1 && self.maxval <= 0xFF => {
                 Ok(TupleType::GrayU8)
             }
-            Some(ArbitraryTuplType::Grayscale) if self.depth <= 1 && self.maxval <= 0xFFFF => {
+            Some(ArbitraryTuplType::Grayscale) if self.depth == 1 && self.maxval <= 0xFFFF => {
                 Ok(TupleType::GrayU16)
             }
             Some(ArbitraryTuplType::Grayscale) => Err(DecoderError::InvalidDepthOrMaxval {
