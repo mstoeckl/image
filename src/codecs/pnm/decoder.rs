@@ -5,7 +5,10 @@ use std::mem::size_of;
 use std::num::ParseIntError;
 use std::str;
 
-use super::{ArbitraryHeader, ArbitraryTuplType, BitmapHeader, GraymapHeader, PixmapHeader};
+use super::{
+    ArbitraryHeader, ArbitraryTuplType, BitmapHeader, FloatmapHeader, FloatmapType, GraymapHeader,
+    PixmapHeader,
+};
 use super::{HeaderRecord, PnmHeader, PnmSubtype, SampleEncoding};
 use crate::color::{ColorType, ExtendedColorType};
 use crate::error::{
@@ -226,10 +229,14 @@ enum TupleType {
     GrayAlphaU8,
     GrayU16,
     GrayAlphaU16,
+    GrayF32Be,
+    GrayF32Le,
     RGBU8,
     RGBAlphaU8,
     RGBU16,
     RGBAlphaU16,
+    RGBF32Be,
+    RGBF32Le,
 }
 
 impl TupleType {
@@ -242,10 +249,14 @@ impl TupleType {
             TupleType::GrayAlphaU8 => ColorType::La8,
             TupleType::GrayU16 => ColorType::L16,
             TupleType::GrayAlphaU16 => ColorType::La16,
+            TupleType::GrayF32Be => ColorType::L32F,
+            TupleType::GrayF32Le => ColorType::L32F,
             TupleType::RGBU8 => ColorType::Rgb8,
             TupleType::RGBAlphaU8 => ColorType::Rgba8,
             TupleType::RGBU16 => ColorType::Rgb16,
             TupleType::RGBAlphaU16 => ColorType::Rgba16,
+            TupleType::RGBF32Be => ColorType::Rgb32F,
+            TupleType::RGBF32Le => ColorType::Rgb32F,
         }
     }
 
@@ -258,10 +269,14 @@ impl TupleType {
             TupleType::GrayAlphaU8 => ExtendedColorType::La8,
             TupleType::GrayU16 => ExtendedColorType::L16,
             TupleType::GrayAlphaU16 => ExtendedColorType::La16,
+            TupleType::GrayF32Be => ExtendedColorType::L32F,
+            TupleType::GrayF32Le => ExtendedColorType::L32F,
             TupleType::RGBU8 => ExtendedColorType::Rgb8,
             TupleType::RGBAlphaU8 => ExtendedColorType::Rgba8,
             TupleType::RGBU16 => ExtendedColorType::Rgb16,
             TupleType::RGBAlphaU16 => ExtendedColorType::Rgba16,
+            TupleType::RGBF32Be => ExtendedColorType::Rgb32F,
+            TupleType::RGBF32Le => ExtendedColorType::Rgb32F,
         }
     }
 }
@@ -312,6 +327,8 @@ impl<R: Read> PnmDecoder<R> {
             [b'P', b'5'] => PnmSubtype::Graymap(SampleEncoding::Binary),
             [b'P', b'6'] => PnmSubtype::Pixmap(SampleEncoding::Binary),
             [b'P', b'7'] => PnmSubtype::ArbitraryMap,
+            [b'P', b'f'] => PnmSubtype::Floatmap(FloatmapType::Grayscale),
+            [b'P', b'F'] => PnmSubtype::Floatmap(FloatmapType::Rgb),
             _ => return Err(DecoderError::PnmMagicInvalid(magic).into()),
         };
 
@@ -323,6 +340,7 @@ impl<R: Read> PnmDecoder<R> {
             PnmSubtype::Bitmap(enc) => PnmDecoder::read_bitmap_header(buffered_read, enc),
             PnmSubtype::Graymap(enc) => PnmDecoder::read_graymap_header(buffered_read, enc),
             PnmSubtype::Pixmap(enc) => PnmDecoder::read_pixmap_header(buffered_read, enc),
+            PnmSubtype::Floatmap(typ) => PnmDecoder::read_floatmap_header(buffered_read, typ),
             PnmSubtype::ArbitraryMap => PnmDecoder::read_arbitrary_header(buffered_read),
         }?;
 
@@ -403,6 +421,34 @@ impl<R: Read> PnmDecoder<R> {
             },
         })
     }
+
+    fn read_floatmap_header(mut reader: R, encoding: FloatmapType) -> ImageResult<PnmDecoder<R>> {
+        let header = reader.read_floatmap_header(encoding)?;
+        let tuple = match encoding {
+            FloatmapType::Grayscale => {
+                if header.is_big_endian {
+                    TupleType::GrayF32Be
+                } else {
+                    TupleType::GrayF32Le
+                }
+            }
+            FloatmapType::Rgb => {
+                if header.is_big_endian {
+                    TupleType::RGBF32Be
+                } else {
+                    TupleType::RGBF32Le
+                }
+            }
+        };
+        Ok(PnmDecoder {
+            reader,
+            tuple,
+            header: PnmHeader {
+                decoded: HeaderRecord::Floatmap(header),
+                encoded: None,
+            },
+        })
+    }
 }
 
 trait HeaderReader: Read {
@@ -470,6 +516,47 @@ trait HeaderReader: Read {
         Ok(value)
     }
 
+    /// Reads the sign of the next decimal number. Returns true if positive, false if negative, errors
+    /// if zero. This does not actually parse the number and may accept invalid values.
+    fn read_next_sign(&mut self) -> ImageResult<bool> {
+        // pair input bytes with a bool mask to remove comments
+        #[allow(clippy::unbuffered_bytes)]
+        let mark_comments = self.bytes().scan(true, |partof, read| {
+            let byte = match read {
+                Err(err) => return Some((*partof, Err(err))),
+                Ok(byte) => byte,
+            };
+            let cur_enabled = *partof && byte != b'#';
+            let next_enabled = cur_enabled || (byte == b'\r' || byte == b'\n');
+            *partof = next_enabled;
+            Some((cur_enabled, Ok(byte)))
+        });
+
+        let mut first = true;
+        let mut negative = false;
+
+        for (_, byte) in mark_comments.filter(|e| e.0) {
+            match byte {
+                Ok(b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r' | b' ') => {
+                    if !first {
+                        break; // We're done as we already have some content
+                    }
+                }
+                Ok(byte) if !byte.is_ascii() => {
+                    return Err(DecoderError::NonAsciiByteInHeader(byte).into())
+                }
+                Ok(byte) => {
+                    if first && byte == b'-' {
+                        negative = true;
+                    }
+                    first = false;
+                }
+                Err(_) => break,
+            }
+        }
+        Ok(!negative)
+    }
+
     fn read_next_line(&mut self) -> ImageResult<String> {
         let mut buffer = Vec::new();
         loop {
@@ -519,6 +606,18 @@ trait HeaderReader: Read {
             height,
             width,
             maxval,
+        })
+    }
+
+    fn read_floatmap_header(&mut self, subtype: FloatmapType) -> ImageResult<FloatmapHeader> {
+        let width = self.read_next_u32()?;
+        let height = self.read_next_u32()?;
+        let is_big_endian = self.read_next_sign()?;
+        Ok(FloatmapHeader {
+            height,
+            width,
+            subtype,
+            is_big_endian,
         })
     }
 
@@ -643,20 +742,6 @@ impl<R: Read> ImageDecoder for PnmDecoder<R> {
         assert_eq!(u64::try_from(buf.len()), Ok(layout.total_bytes()));
         let original_color_type = Some(self.tuple.original_color());
 
-        match self.tuple {
-            TupleType::PbmBit => self.read_samples::<PbmBit>(1, buf),
-            TupleType::BWBit => self.read_samples::<BWBit>(1, buf),
-            TupleType::BWAlphaBit => self.read_samples::<BWBit>(2, buf),
-            TupleType::RGBU8 => self.read_samples::<U8>(3, buf),
-            TupleType::RGBAlphaU8 => self.read_samples::<U8>(4, buf),
-            TupleType::RGBU16 => self.read_samples::<U16>(3, buf),
-            TupleType::RGBAlphaU16 => self.read_samples::<U16>(4, buf),
-            TupleType::GrayU8 => self.read_samples::<U8>(1, buf),
-            TupleType::GrayAlphaU8 => self.read_samples::<U8>(2, buf),
-            TupleType::GrayU16 => self.read_samples::<U16>(1, buf),
-            TupleType::GrayAlphaU16 => self.read_samples::<U16>(2, buf),
-        }?;
-
         Ok(DecodedImageAttributes {
             original_color_type,
             ..DecodedImageAttributes::default()
@@ -698,6 +783,46 @@ impl<R: Read> PnmDecoder<R> {
                     chunk.copy_from_slice(&v.to_ne_bytes());
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    fn read_float_samples(
+        &mut self,
+        components: u32,
+        is_be: bool,
+        buf: &mut [u8],
+    ) -> ImageResult<()> {
+        if buf.is_empty() {
+            return Ok(());
+        }
+
+        self.reader.read_exact(buf)?;
+
+        if is_be {
+            for c in buf.as_chunks_mut().0 {
+                *c = u32::to_ne_bytes(u32::from_be_bytes(*c));
+            }
+        } else {
+            for c in buf.as_chunks_mut().0 {
+                *c = u32::to_ne_bytes(u32::from_le_bytes(*c));
+            }
+        }
+
+        // Unlike the other formats, PFM rows are bottom to top
+        let stride = (self.header.width() as usize)
+            .checked_mul(4 * components as usize)
+            .expect("no overflow, stride <= buf.len()");
+        let half_size = stride
+            .checked_mul(self.header.height() as usize / 2)
+            .expect("no overflow, half_size <= buf.len");
+        let (top_half, bottom_half) = buf.split_at_mut(half_size);
+        for (row1, row2) in top_half
+            .chunks_exact_mut(stride)
+            .zip(bottom_half.chunks_exact_mut(stride).rev())
+        {
+            row1.swap_with_slice(row2);
         }
 
         Ok(())

@@ -5,8 +5,10 @@ use std::io;
 use std::io::Write;
 
 use super::AutoBreak;
-use super::{ArbitraryHeader, ArbitraryTuplType, BitmapHeader, GraymapHeader, PixmapHeader};
-use super::{HeaderRecord, PnmHeader, PnmSubtype, SampleEncoding};
+use super::{
+    ArbitraryHeader, ArbitraryTuplType, BitmapHeader, FloatmapHeader, GraymapHeader, PixmapHeader,
+};
+use super::{FloatmapType, HeaderRecord, PnmHeader, PnmSubtype, SampleEncoding};
 
 use crate::color::ExtendedColorType;
 use crate::error::{
@@ -19,6 +21,7 @@ use byteorder_lite::{BigEndian, WriteBytesExt};
 
 enum HeaderStrategy {
     DynamicPnm,
+    DynamicPfm,
     Subtype(PnmSubtype),
     Chosen(PnmHeader),
 }
@@ -27,6 +30,7 @@ enum HeaderStrategy {
 pub enum FlatSamples<'a> {
     U8(&'a [u8]),
     U16(&'a [u16]),
+    F32(&'a [f32]),
 }
 
 /// Encodes images to any of the `pnm` image formats.
@@ -76,6 +80,11 @@ enum TupleEncoding<'a> {
     },
     Bytes {
         samples: FlatSamples<'a>,
+    },
+    Floats {
+        samples: FlatSamples<'a>,
+        stride: usize,
+        is_big_endian: bool,
     },
 }
 
@@ -153,13 +162,25 @@ impl<W: Write> PnmEncoder<W> {
             header: HeaderStrategy::DynamicPnm,
         }
     }
+    /// Automatically choose a PFM header for each image.
+    ///
+    /// The chosen format will be one of the PFM variants.
+    ///
+    /// This will overwrite the effect of earlier calls to set the header or subtype.
+    pub fn with_dynamic_pfm_header(self) -> Self {
+        PnmEncoder {
+            writer: self.writer,
+            header: HeaderStrategy::DynamicPfm,
+        }
+    }
 
-    /// Encode an image whose samples are represented as a sequence of `u8` or `u16` data.
+    /// Encode an image whose samples are represented as a sequence of `u8`, `u16`, or `f32` data.
     ///
     /// If `image` is a slice of `u8`, the samples will be interpreted based on the chosen `color` option.
-    /// Color types of 16-bit precision means that the bytes are reinterpreted as 16-bit samples,
-    /// otherwise they are treated as 8-bit samples.
-    /// If `image` is a slice of `u16`, the samples will be interpreted as 16-bit samples directly.
+    /// (Color types of 16-bit precision will reinterpet plain bytes as 16-bit samples;
+    /// floating point color types as f32 samples.)
+    ///
+    /// Otherwise, the format of the samples will be preserved.
     ///
     /// Some `pnm` subtypes are incompatible with some color options, a chosen header most
     /// certainly with any deviation from the original decoded image.
@@ -204,6 +225,33 @@ impl<W: Write> PnmEncoder<W> {
                     }
                 }
             }
+            (
+                FlatSamples::U8(samples),
+                ExtendedColorType::L32F
+                | ExtendedColorType::La32F
+                | ExtendedColorType::Rgb32F
+                | ExtendedColorType::Rgba32F,
+            ) => {
+                match bytemuck::try_cast_slice(samples) {
+                    // proceed with aligned 32-bit samples
+                    Ok(samples) => FlatSamples::F32(samples),
+                    Err(_e) => {
+                        // reallocation is required
+                        let new_samples: Vec<f32> = samples
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .map(|chunk| f32::from_ne_bytes(*chunk))
+                            .collect();
+
+                        let image = FlatSamples::F32(&new_samples);
+
+                        // make a separate encoding path,
+                        // because the image buffer lifetime has changed
+                        return self.encode_impl(image, width, height, color);
+                    }
+                }
+            }
             // should not be necessary for any other case
             _ => image,
         };
@@ -221,6 +269,7 @@ impl<W: Write> PnmEncoder<W> {
     ) -> ImageResult<()> {
         let header = match self.header {
             HeaderStrategy::DynamicPnm => &Self::choose_dynamic_pnm_header(width, height, color)?,
+            HeaderStrategy::DynamicPfm => &Self::choose_dynamic_pfm_header(width, height, color)?,
             HeaderStrategy::Subtype(subtype) => {
                 &Self::choose_subtyped_header(subtype, width, height, color)?
             }
@@ -287,6 +336,29 @@ impl<W: Write> PnmEncoder<W> {
             ExtendedColorType::Rgb8 | ExtendedColorType::Rgb16 => {
                 PnmSubtype::Pixmap(SampleEncoding::Binary)
             }
+            _ => {
+                return Err(ImageError::Unsupported(
+                    UnsupportedError::from_format_and_kind(
+                        ImageFormat::Pnm.into(),
+                        UnsupportedErrorKind::Color(color),
+                    ),
+                ))
+            }
+        };
+        Self::choose_subtyped_header(subtype, width, height, color)
+    }
+
+    /// Choose any valid PFM format that the image can be expressed in and write its header.
+    ///
+    /// Returns how the body should be written if successful.
+    fn choose_dynamic_pfm_header(
+        width: u32,
+        height: u32,
+        color: ExtendedColorType,
+    ) -> ImageResult<PnmHeader> {
+        let subtype = match color {
+            ExtendedColorType::L32F => PnmSubtype::Floatmap(FloatmapType::Grayscale),
+            ExtendedColorType::Rgb32F => PnmSubtype::Floatmap(FloatmapType::Rgb),
             _ => {
                 return Err(ImageError::Unsupported(
                     UnsupportedError::from_format_and_kind(
@@ -373,6 +445,46 @@ impl<W: Write> PnmEncoder<W> {
                         height,
                         width,
                         maxval,
+                    }),
+                    encoded: None,
+                }
+            }
+            PnmSubtype::Floatmap(FloatmapType::Grayscale) => {
+                if color != ExtendedColorType::L32F {
+                    return Err(ImageError::Unsupported(
+                        UnsupportedError::from_format_and_kind(
+                            ImageFormat::Pnm.into(),
+                            UnsupportedErrorKind::Color(color),
+                        ),
+                    ));
+                };
+
+                PnmHeader {
+                    decoded: HeaderRecord::Floatmap(FloatmapHeader {
+                        subtype: FloatmapType::Grayscale,
+                        height,
+                        width,
+                        is_big_endian: false,
+                    }),
+                    encoded: None,
+                }
+            }
+            PnmSubtype::Floatmap(FloatmapType::Rgb) => {
+                if color != ExtendedColorType::Rgb32F {
+                    return Err(ImageError::Unsupported(
+                        UnsupportedError::from_format_and_kind(
+                            ImageFormat::Pnm.into(),
+                            UnsupportedErrorKind::Color(color),
+                        ),
+                    ));
+                };
+
+                PnmHeader {
+                    decoded: HeaderRecord::Floatmap(FloatmapHeader {
+                        subtype: FloatmapType::Rgb,
+                        height,
+                        width,
+                        is_big_endian: false,
                     }),
                     encoded: None,
                 }
@@ -564,6 +676,28 @@ impl<'a> CheckedDimensions<'a> {
                     )))
                 }
             },
+
+            PnmHeader {
+                decoded: HeaderRecord::Floatmap(FloatmapHeader { subtype, .. }),
+                ..
+            } => match (subtype, color) {
+                (FloatmapType::Grayscale, ExtendedColorType::L32F) => (),
+                (FloatmapType::Rgb, ExtendedColorType::Rgb32F) => (),
+                (FloatmapType::Grayscale, _) => {
+                    return Err(ImageError::Parameter(ParameterError::from_kind(
+                    ParameterErrorKind::Generic(
+                        format!("PFM format (variant Pf) only supports ExtendedColorType::L32F, not {:?}", color),
+                    ),
+                )));
+                }
+                (FloatmapType::Rgb, _) => {
+                    return Err(ImageError::Parameter(ParameterError::from_kind(
+                        ParameterErrorKind::Generic(
+                            format!("PFM format (variant PF) only supports ExtendedColorType::Rgb32F, not {:?}", color),
+                        ),
+                    )));
+                }
+            },
         }
 
         Ok(CheckedHeaderColor {
@@ -576,48 +710,51 @@ impl<'a> CheckedDimensions<'a> {
 impl<'a> CheckedHeaderColor<'a> {
     fn check_sample_values(self, image: FlatSamples<'a>) -> ImageResult<CheckedHeader<'a>> {
         let header_maxval = match self.dimensions.unchecked.header.decoded {
-            HeaderRecord::Bitmap(_) => 1,
-            HeaderRecord::Graymap(GraymapHeader { maxwhite, .. }) => maxwhite,
-            HeaderRecord::Pixmap(PixmapHeader { maxval, .. }) => maxval,
-            HeaderRecord::Arbitrary(ArbitraryHeader { maxval, .. }) => maxval,
-        };
-
-        // We trust the image color bit count to be correct at least.
-        let max_sample = match self.color {
-            ExtendedColorType::Unknown(n) if n <= 16 => (1 << n) - 1,
-            ExtendedColorType::L1 | ExtendedColorType::La1 => 1,
-            ExtendedColorType::L8
-            | ExtendedColorType::La8
-            | ExtendedColorType::Rgb8
-            | ExtendedColorType::Rgba8
-            | ExtendedColorType::Bgr8
-            | ExtendedColorType::Bgra8 => 0xff,
-            ExtendedColorType::L16
-            | ExtendedColorType::La16
-            | ExtendedColorType::Rgb16
-            | ExtendedColorType::Rgba16 => 0xffff,
-            _ => {
-                // Unsupported target color type.
-                return Err(ImageError::Unsupported(
-                    UnsupportedError::from_format_and_kind(
-                        ImageFormat::Pnm.into(),
-                        UnsupportedErrorKind::Color(self.color),
-                    ),
-                ));
-            }
+            HeaderRecord::Bitmap(_) => Some(1),
+            HeaderRecord::Graymap(GraymapHeader { maxwhite, .. }) => Some(maxwhite),
+            HeaderRecord::Pixmap(PixmapHeader { maxval, .. }) => Some(maxval),
+            HeaderRecord::Arbitrary(ArbitraryHeader { maxval, .. }) => Some(maxval),
+            HeaderRecord::Floatmap(_) => None,
         };
 
         // Avoid the performance heavy check if possible, e.g. if the header has been chosen by us.
-        if header_maxval < max_sample && !image.all_smaller(header_maxval) {
-            // Sample value greater than allowed for chosen header.
-            return Err(ImageError::Unsupported(
-                UnsupportedError::from_format_and_kind(
-                    ImageFormat::Pnm.into(),
-                    UnsupportedErrorKind::GenericFeature(
-                        "Sample value greater than allowed for chosen header".to_owned(),
+        if let Some(maxval) = header_maxval {
+            // We trust the image color bit count to be correct at least.
+            let max_sample = match self.color {
+                ExtendedColorType::Unknown(n) if n <= 16 => (1 << n) - 1,
+                ExtendedColorType::L1 | ExtendedColorType::La1 => 1,
+                ExtendedColorType::L8
+                | ExtendedColorType::La8
+                | ExtendedColorType::Rgb8
+                | ExtendedColorType::Rgba8
+                | ExtendedColorType::Bgr8
+                | ExtendedColorType::Bgra8 => 0xff,
+                ExtendedColorType::L16
+                | ExtendedColorType::La16
+                | ExtendedColorType::Rgb16
+                | ExtendedColorType::Rgba16 => 0xffff,
+                _ => {
+                    // Unsupported target color type.
+                    return Err(ImageError::Unsupported(
+                        UnsupportedError::from_format_and_kind(
+                            ImageFormat::Pnm.into(),
+                            UnsupportedErrorKind::Color(self.color),
+                        ),
+                    ));
+                }
+            };
+
+            if maxval < max_sample && !image.all_smaller(maxval) {
+                // Sample value greater than allowed for chosen header.
+                return Err(ImageError::Unsupported(
+                    UnsupportedError::from_format_and_kind(
+                        ImageFormat::Pnm.into(),
+                        UnsupportedErrorKind::GenericFeature(
+                            "Sample value greater than allowed for chosen header".to_owned(),
+                        ),
                     ),
-                ),
-            ));
+                ));
+            }
         }
 
         let encoding = image.encoding_for(&self.dimensions.unchecked.header.decoded);
@@ -697,6 +834,23 @@ impl SampleWriter<'_> {
 
         self.0.flush()
     }
+
+    fn write_floatmap<const BE: bool>(self, samples: &[f32], stride: usize) -> io::Result<()> {
+        let mut line_buffer = vec_try_with_capacity::<[u8; 4]>(stride)?;
+
+        for row in samples.chunks_exact(stride).rev() {
+            for item in row {
+                if BE {
+                    line_buffer.push(f32::to_be_bytes(*item));
+                } else {
+                    line_buffer.push(f32::to_le_bytes(*item));
+                }
+            }
+            self.0.write_all(line_buffer.as_slice().as_flattened())?;
+            line_buffer.clear();
+        }
+        self.0.flush()
+    }
 }
 
 impl<'a> FlatSamples<'a> {
@@ -704,6 +858,7 @@ impl<'a> FlatSamples<'a> {
         match *self {
             FlatSamples::U8(arr) => arr.len(),
             FlatSamples::U16(arr) => arr.len(),
+            FlatSamples::F32(arr) => arr.len(),
         }
     }
 
@@ -711,6 +866,7 @@ impl<'a> FlatSamples<'a> {
         match *self {
             FlatSamples::U8(arr) => arr.iter().all(|&val| u32::from(val) <= max_val),
             FlatSamples::U16(arr) => arr.iter().all(|&val| u32::from(val) <= max_val),
+            FlatSamples::F32(_) => unimplemented!(),
         }
     }
 
@@ -749,6 +905,20 @@ impl<'a> FlatSamples<'a> {
                 encoding: SampleEncoding::Binary,
                 ..
             }) => TupleEncoding::Bytes { samples: *self },
+
+            HeaderRecord::Floatmap(FloatmapHeader {
+                is_big_endian,
+                subtype,
+                width,
+                ..
+            }) => TupleEncoding::Floats {
+                samples: *self,
+                stride: match subtype {
+                    FloatmapType::Grayscale => 1,
+                    FloatmapType::Rgb => 3,
+                } * width as usize,
+                is_big_endian,
+            },
         }
     }
 }
@@ -780,6 +950,10 @@ impl TupleEncoding<'_> {
             } => SampleWriter(writer)
                 .write_pbm_bits(samples, width)
                 .map_err(ImageError::IoError),
+            TupleEncoding::PbmBits {
+                samples: FlatSamples::F32(_),
+                ..
+            } => panic!("invalid samples for PbmBits encoding"),
 
             TupleEncoding::Bytes {
                 samples: FlatSamples::U8(samples),
@@ -791,6 +965,25 @@ impl TupleEncoding<'_> {
                     .write_u16::<BigEndian>(sample)
                     .map_err(ImageError::IoError)
             }),
+            TupleEncoding::Bytes {
+                samples: FlatSamples::F32(_),
+            } => panic!("invalid samples for Bytes encoding"),
+
+            TupleEncoding::Floats {
+                samples: FlatSamples::F32(samples),
+                stride,
+                is_big_endian: true,
+            } => SampleWriter(writer)
+                .write_floatmap::<true>(samples, stride)
+                .map_err(ImageError::IoError),
+            TupleEncoding::Floats {
+                samples: FlatSamples::F32(samples),
+                stride,
+                is_big_endian: false,
+            } => SampleWriter(writer)
+                .write_floatmap::<false>(samples, stride)
+                .map_err(ImageError::IoError),
+            TupleEncoding::Floats { .. } => panic!("invalid samples for Floats encoding"),
 
             TupleEncoding::Ascii {
                 samples: FlatSamples::U8(samples),
@@ -802,6 +995,9 @@ impl TupleEncoding<'_> {
             } => SampleWriter(writer)
                 .write_samples_ascii(samples.iter())
                 .map_err(ImageError::IoError),
+            TupleEncoding::Ascii {
+                samples: FlatSamples::F32(_),
+            } => panic!("invalid samples for Ascii encoding"),
         }
     }
 }

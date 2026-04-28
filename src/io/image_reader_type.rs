@@ -230,6 +230,8 @@ impl<'a, R: 'a + BufRead + Seek> ImageReaderOptions<R> {
             ImageFormat::OpenExr => Box::new(openexr::OpenExrDecoder::new(reader)?),
             #[cfg(feature = "pnm")]
             ImageFormat::Pnm => Box::new(pnm::PnmDecoder::new(reader)?),
+            #[cfg(feature = "pnm")]
+            ImageFormat::Pfm => Box::new(pnm::PnmDecoder::new(reader)?),
             #[cfg(feature = "ff")]
             ImageFormat::Farbfeld => Box::new(farbfeld::FarbfeldDecoder::new(reader)?),
             #[cfg(feature = "qoi")]

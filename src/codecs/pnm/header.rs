@@ -10,6 +10,16 @@ pub enum SampleEncoding {
     Ascii,
 }
 
+/// The subtype of Portable Floatmap
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FloatmapType {
+    /// Grayscale, 1 channel
+    Grayscale,
+
+    /// RGB, 3 channels
+    Rgb,
+}
+
 /// Denotes the category of the magic number
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PnmSubtype {
@@ -21,6 +31,9 @@ pub enum PnmSubtype {
 
     /// Magic numbers P3 and P6
     Pixmap(SampleEncoding),
+
+    /// Magic numbers PF and Pf
+    Floatmap(FloatmapType),
 
     /// Magic number P7
     ArbitraryMap,
@@ -38,12 +51,13 @@ pub struct PnmHeader {
     pub(crate) encoded: Option<Vec<u8>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) enum HeaderRecord {
     Bitmap(BitmapHeader),
     Graymap(GraymapHeader),
     Pixmap(PixmapHeader),
     Arbitrary(ArbitraryHeader),
+    Floatmap(FloatmapHeader),
 }
 
 /// Header produced by a `pbm` file ("Portable Bit Map")
@@ -110,6 +124,25 @@ pub struct ArbitraryHeader {
     pub tupltype: Option<ArbitraryTuplType>,
 }
 
+/// Header produced by a `pfm` file ("Portable Float Map")
+///
+/// As described in the module documentation, only the sign of the third parameter
+/// is used and its magnitude is discarded.
+#[derive(Clone, Copy, Debug)]
+pub struct FloatmapHeader {
+    /// Height of the image file
+    pub height: u32,
+
+    /// Width of the image file
+    pub width: u32,
+
+    /// Number of color channels
+    pub subtype: FloatmapType,
+
+    /// Endianness
+    pub is_big_endian: bool,
+}
+
 /// Standardized tuple type specifiers in the header of a `pam`.
 #[derive(Clone, Debug)]
 pub enum ArbitraryTuplType {
@@ -161,6 +194,8 @@ impl PnmSubtype {
             PnmSubtype::Graymap(SampleEncoding::Binary) => b"P5",
             PnmSubtype::Pixmap(SampleEncoding::Binary) => b"P6",
             PnmSubtype::ArbitraryMap => b"P7",
+            PnmSubtype::Floatmap(FloatmapType::Grayscale) => b"Pf",
+            PnmSubtype::Floatmap(FloatmapType::Rgb) => b"PF",
         }
     }
 
@@ -172,6 +207,7 @@ impl PnmSubtype {
             PnmSubtype::Bitmap(enc) => enc,
             PnmSubtype::Graymap(enc) => enc,
             PnmSubtype::Pixmap(enc) => enc,
+            PnmSubtype::Floatmap(_) => SampleEncoding::Binary,
         }
     }
 }
@@ -185,6 +221,7 @@ impl PnmHeader {
             HeaderRecord::Graymap(GraymapHeader { encoding, .. }) => PnmSubtype::Graymap(encoding),
             HeaderRecord::Pixmap(PixmapHeader { encoding, .. }) => PnmSubtype::Pixmap(encoding),
             HeaderRecord::Arbitrary(ArbitraryHeader { .. }) => PnmSubtype::ArbitraryMap,
+            HeaderRecord::Floatmap(FloatmapHeader { subtype, .. }) => PnmSubtype::Floatmap(subtype),
         }
     }
 
@@ -196,6 +233,7 @@ impl PnmHeader {
             HeaderRecord::Graymap(GraymapHeader { width, .. }) => width,
             HeaderRecord::Pixmap(PixmapHeader { width, .. }) => width,
             HeaderRecord::Arbitrary(ArbitraryHeader { width, .. }) => width,
+            HeaderRecord::Floatmap(FloatmapHeader { width, .. }) => width,
         }
     }
 
@@ -207,10 +245,13 @@ impl PnmHeader {
             HeaderRecord::Graymap(GraymapHeader { height, .. }) => height,
             HeaderRecord::Pixmap(PixmapHeader { height, .. }) => height,
             HeaderRecord::Arbitrary(ArbitraryHeader { height, .. }) => height,
+            HeaderRecord::Floatmap(FloatmapHeader { height, .. }) => height,
         }
     }
 
     /// The biggest value a sample can have. In other words, the colour resolution.
+    ///
+    /// Will return 0 for floating point types.
     #[must_use]
     pub fn maximal_sample(&self) -> u32 {
         match self.decoded {
@@ -218,6 +259,7 @@ impl PnmHeader {
             HeaderRecord::Graymap(GraymapHeader { maxwhite, .. }) => maxwhite,
             HeaderRecord::Pixmap(PixmapHeader { maxval, .. }) => maxval,
             HeaderRecord::Arbitrary(ArbitraryHeader { maxval, .. }) => maxval,
+            HeaderRecord::Floatmap(FloatmapHeader { .. }) => 0,
         }
     }
 
@@ -294,6 +336,20 @@ impl PnmHeader {
                     }),
                 ..
             } => writeln!(writer, "\n{width} {height} {maxval}"),
+            PnmHeader {
+                decoded:
+                    HeaderRecord::Floatmap(FloatmapHeader {
+                        subtype: _subtype,
+                        width,
+                        height,
+                        is_big_endian,
+                    }),
+                ..
+            } => writeln!(
+                writer,
+                "\n{width} {height}\n{}",
+                if is_big_endian { "1" } else { "-1" }
+            ),
             PnmHeader {
                 decoded:
                     HeaderRecord::Arbitrary(ArbitraryHeader {

@@ -1,9 +1,20 @@
-//! Decoding and Encoding of Netpbm image formats (pbm, pgm, ppm and pam).
+//! Decoding and Encoding of Netpbm image formats (PBM, PGM, PPM, PAM) and PFM.
 //!
-//! The formats pbm, pgm and ppm are fully supported. Only the official subformats
+//! The formats PBM, PGM, PPM, and PFM are fully supported. Only the official subformats
 //! (`BLACKANDWHITE`, `GRAYSCALE`, `RGB`, `BLACKANDWHITE_ALPHA`, `GRAYSCALE_ALPHA`,
-//! and `RGB_ALPHA`) of pam are supported; custom tuple types have no clear
+//! and `RGB_ALPHA`) of PAM are supported; custom tuple types have no clear
 //! interpretation as an image and will be rejected.
+//!
+//! The PFM format appears to have been introduced in the early 2000s by the developers
+//! of HDRView and HDRShop. Its header contains three numbers: the width, height, and a
+//! third value whose sign determines the endianness of the float data. While one of
+//! the original format authors assigns no interpretation to the magnitude of the value,
+//! (and a version of HDRView from April 2000 confirms this by ignoring it) it has been
+//! called "aspect ratio" or "scale" by other sources; in both cases ambiguously.
+//! Decoders that do try to interpret the magnitude as modifying for the image content
+//! do so inconsistently; some multiply, others divide. To avoid exacerbating the issue,
+//! PnmEncoder will only ever write +1 (big endian) or -1 (little endian), and PnmDecoder
+//! will only look at the sign of the third value and ignore the magnitude.
 //!
 //!  # Related Links
 //!  * <https://netpbm.sourceforge.net/doc/pbm.html> - specification for PBM
@@ -11,15 +22,19 @@
 //!  * <https://netpbm.sourceforge.net/doc/ppm.html> - specification for PPM
 //!  * <https://netpbm.sourceforge.net/doc/pnm.html> - definition for PNM
 //!  * <https://netpbm.sourceforge.net/doc/pam.html> - specification for PAM
+//!  * <https://pauldebevec.com/Research/HDR/PFM/> - PFM format description, from original author, assigns no interpretation
+//!  * <https://netpbm.sourceforge.net/doc/pfm.html> - NetPBM's PFM format description, since circa 2004. Describes the third value as "scale" ambiguously
+//!  * <https://paulbourke.net/dataformats/pbmhdr/> - Another PFM format description, from 2003. Describes the third value as "aspect ratio"
+//! - https://web.archive.org/web/20010429200914/http://www.debevec.org/Probes/ - an early mention of PFM
 
 use self::autobreak::AutoBreak;
 pub use self::decoder::PnmDecoder;
 pub use self::encoder::PnmEncoder;
 use self::header::HeaderRecord;
 pub use self::header::{
-    ArbitraryHeader, ArbitraryTuplType, BitmapHeader, GraymapHeader, PixmapHeader,
+    ArbitraryHeader, ArbitraryTuplType, BitmapHeader, FloatmapHeader, GraymapHeader, PixmapHeader,
 };
-pub use self::header::{PnmHeader, PnmSubtype, SampleEncoding};
+pub use self::header::{FloatmapType, PnmHeader, PnmSubtype, SampleEncoding};
 
 mod autobreak;
 mod decoder;

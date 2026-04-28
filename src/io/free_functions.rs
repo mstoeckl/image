@@ -69,6 +69,10 @@ pub(crate) fn encoder_for_format<'a, W: Write + Seek>(
         ImageFormat::Jpeg => Box::new(jpeg::JpegEncoder::new(buffered_write)),
         #[cfg(feature = "pnm")]
         ImageFormat::Pnm => Box::new(pnm::PnmEncoder::new(buffered_write)),
+        #[cfg(feature = "pnm")]
+        ImageFormat::Pfm => {
+            Box::new(pnm::PnmEncoder::new(buffered_write).with_dynamic_pfm_header())
+        }
         #[cfg(feature = "gif")]
         ImageFormat::Gif => Box::new(gif::GifEncoder::new(buffered_write)),
         #[cfg(feature = "ico")]
@@ -103,7 +107,7 @@ pub(crate) fn encoder_for_format<'a, W: Write + Seek>(
     })
 }
 
-static MAGIC_BYTES: [(&[u8], &[u8], ImageFormat); 21] = [
+static MAGIC_BYTES: [(&[u8], &[u8], ImageFormat); 23] = [
     (b"\x89PNG\r\n\x1a\n", b"", ImageFormat::Png),
     (&[0xff, 0xd8, 0xff], b"", ImageFormat::Jpeg),
     (b"GIF89a", b"", ImageFormat::Gif),
@@ -128,6 +132,8 @@ static MAGIC_BYTES: [(&[u8], &[u8], ImageFormat); 21] = [
     (b"P5", b"", ImageFormat::Pnm),
     (b"P6", b"", ImageFormat::Pnm),
     (b"P7", b"", ImageFormat::Pnm),
+    (b"PF", b"", ImageFormat::Pfm),
+    (b"Pf", b"", ImageFormat::Pfm),
     (b"farbfeld", b"", ImageFormat::Farbfeld),
 ];
 
@@ -198,7 +204,7 @@ fn test_guess_format_agrees_with_extension() {
         let found = found.contains(&fmt);
         if matches!(
             fmt,
-            Bmp | Farbfeld | Gif | Ico | Hdr | Jpeg | OpenExr | Png | Pnm | Qoi | Tiff | WebP
+            Bmp | Farbfeld | Gif | Ico | Hdr | Jpeg | OpenExr | Png | Pnm | Pfm | Qoi | Tiff | WebP
         ) {
             assert!(found, "No {fmt:?} test files found");
         } else {
