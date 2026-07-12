@@ -2,7 +2,11 @@ use std::io::{BufRead, Seek};
 
 use image_webp::LoopCount;
 
-use crate::error::{DecodingError, ImageError, ImageResult, ParameterError, ParameterErrorKind};
+use crate::error::{
+    DecodingError, ImageError, ImageResult, ParameterError, ParameterErrorKind, UnsupportedError,
+    UnsupportedErrorKind,
+};
+use crate::io::decoder::CicpProfile;
 use crate::io::{
     DecodedAnimationAttributes, DecodedImageAttributes, DecodedMetadataHint, DecoderPreparedImage,
     FormatAttributes, SequenceControl,
@@ -45,6 +49,7 @@ impl<R: BufRead + Seek> ImageDecoder for WebPDecoder<R> {
             // As per extended file format description:
             // <https://developers.google.com/speed/webp/docs/riff_container#extended_file_format>
             icc: DecodedMetadataHint::InHeader,
+            color_profile: DecodedMetadataHint::InHeader,
             exif: DecodedMetadataHint::InHeader,
             xmp: DecodedMetadataHint::InHeader,
             ..FormatAttributes::default()
@@ -109,6 +114,23 @@ impl<R: BufRead + Seek> ImageDecoder for WebPDecoder<R> {
         self.inner
             .icc_profile()
             .map_err(ImageError::from_webp_decode)
+    }
+
+    fn color_profile_to_icc(&mut self) -> ImageResult<Option<Vec<u8>>> {
+        self.icc_profile()
+    }
+
+    fn color_profile_to_cicp(&mut self) -> ImageResult<Option<CicpProfile>> {
+        if self.icc_profile()?.is_some() {
+            Err(ImageError::Unsupported(
+                UnsupportedError::from_format_and_kind(
+                    ImageFormat::WebP.into(),
+                    UnsupportedErrorKind::ColorProfileIsICC,
+                ),
+            ))
+        } else {
+            Ok(None)
+        }
     }
 
     fn exif_metadata(&mut self) -> ImageResult<Option<Vec<u8>>> {

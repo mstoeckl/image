@@ -41,6 +41,7 @@ use crate::error::{
     DecodingError, EncodingError, ImageError, ImageResult, LimitError, LimitErrorKind,
     ParameterError, ParameterErrorKind, UnsupportedError, UnsupportedErrorKind,
 };
+use crate::io::decoder::CicpProfile;
 use crate::io::{
     DecodedAnimationAttributes, DecodedImageAttributes, DecodedMetadataHint, DecoderPreparedImage,
     FormatAttributes,
@@ -117,6 +118,7 @@ impl<R: BufRead + Seek> ImageDecoder for GifDecoder<R> {
             // FIXME: may appear anywhere.
             xmp: DecodedMetadataHint::InHeader,
             icc: DecodedMetadataHint::InHeader,
+            color_profile: DecodedMetadataHint::InHeader,
             iptc: DecodedMetadataHint::None,
             // FIXME: there is some in a Photoshop 8BIM extension which we do not collect.
             exif: DecodedMetadataHint::Unsupported,
@@ -357,6 +359,23 @@ impl<R: BufRead + Seek> ImageDecoder for GifDecoder<R> {
         let decoder = self.ensure_decoder()?;
         // Similar to XMP metadata
         Ok(decoder.icc_profile().map(Vec::from))
+    }
+
+    fn color_profile_to_icc(&mut self) -> ImageResult<Option<Vec<u8>>> {
+        self.icc_profile()
+    }
+
+    fn color_profile_to_cicp(&mut self) -> ImageResult<Option<CicpProfile>> {
+        if self.icc_profile()?.is_some() {
+            Err(ImageError::Unsupported(
+                UnsupportedError::from_format_and_kind(
+                    ImageFormat::Gif.into(),
+                    UnsupportedErrorKind::ColorProfileIsICC,
+                ),
+            ))
+        } else {
+            Ok(None)
+        }
     }
 
     fn xmp_metadata(&mut self) -> ImageResult<Option<Vec<u8>>> {

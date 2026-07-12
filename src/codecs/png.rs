@@ -8,7 +8,7 @@ use core::num::NonZeroU32;
 use std::borrow::Cow;
 use std::io::{BufRead, Seek, Write};
 
-use png::{BlendOp, DeflateCompression, DisposeOp};
+use png::{BlendOp, DeflateCompression, DisposeOp, ScaledFloat, SrgbRenderingIntent};
 
 use crate::animation::Delay;
 use crate::color::{ColorType, ExtendedColorType};
@@ -16,13 +16,16 @@ use crate::error::{
     DecodingError, EncodingError, ImageError, ImageResult, LimitError, LimitErrorKind,
     ParameterError, ParameterErrorKind, UnsupportedError, UnsupportedErrorKind,
 };
-use crate::io::decoder::DecodedMetadataHint;
+use crate::io::decoder::{CicpProfile, DecodedMetadataHint};
 use crate::io::{
     DecodedAnimationAttributes, DecodedImageAttributes, DecoderPreparedImage, FormatAttributes,
     SequenceControl,
 };
 use crate::math::Rect;
-use crate::metadata::LoopCount;
+use crate::metadata::{
+    Cicp, CicpColorPrimaries, CicpMatrixCoefficients, CicpTransferCharacteristics,
+    CicpVideoFullRangeFlag, LoopCount,
+};
 use crate::utils::vec_try_with_capacity;
 use crate::{
     DynamicImage, GenericImage, GenericImageView, ImageDecoder, ImageEncoder, ImageFormat,
@@ -293,6 +296,8 @@ impl<R: BufRead + Seek> ImageDecoder for PngDecoder<R> {
             iptc: DecodedMetadataHint::InHeader,
             // see iCCP chunk order.
             icc: DecodedMetadataHint::InHeader,
+            // see chunk order of all color chunks.
+            color_profile: DecodedMetadataHint::InHeader,
             // see eXIf chunk order.
             exif: DecodedMetadataHint::InHeader,
             ..FormatAttributes::default()
@@ -307,6 +312,205 @@ impl<R: BufRead + Seek> ImageDecoder for PngDecoder<R> {
     fn icc_profile(&mut self) -> ImageResult<Option<Vec<u8>>> {
         let reader = self.ensure_reader_and_header()?;
         Ok(reader.info().icc_profile.as_ref().map(|x| x.to_vec()))
+    }
+
+    fn color_profile_to_icc(&mut self) -> ImageResult<Option<Vec<u8>>> {
+        let reader = self.ensure_reader_and_header()?;
+        let info = reader.info();
+
+        if info.coding_independent_code_points.is_some() {
+            // TODO: if acually useful, synthesize and return an ICC profile
+            // based on the cICP chunk if the latter is present
+            Err(ImageError::Unsupported(
+                UnsupportedError::from_format_and_kind(
+                    ImageFormat::Png.into(),
+                    UnsupportedErrorKind::ColorProfileIsCicp,
+                ),
+            ))
+        } else if let Some(profile) = &info.icc_profile {
+            // Per PNG v3 sec. 4.3, iCCP is the second priority color chunk and
+            // should be ignored if cICP is present.
+            Ok(Some(profile.to_vec()))
+        } else if let Some(intent) = info.srgb {
+            let mut profile = moxcms::ColorProfile::new_srgb();
+            profile.rendering_intent = match intent {
+                SrgbRenderingIntent::Perceptual => moxcms::RenderingIntent::Perceptual,
+                SrgbRenderingIntent::RelativeColorimetric => {
+                    moxcms::RenderingIntent::RelativeColorimetric
+                }
+                SrgbRenderingIntent::Saturation => moxcms::RenderingIntent::Saturation,
+                SrgbRenderingIntent::AbsoluteColorimetric => {
+                    moxcms::RenderingIntent::AbsoluteColorimetric
+                }
+            };
+            Ok(Some(
+                profile
+                    .encode()
+                    .expect("simple synthetic profile should always succeed"),
+            ))
+        } else if info.gama_chunk.is_some_and(|x| x.into_scaled() != 0)
+            || reader.info().chrm_chunk.is_some()
+        {
+            // NOTE: PNG v3 13.13, Decoder gamma handling, recommends ignoring 0 gAMA as erroneous
+            let Some(gama) = info.gama_chunk.filter(|x| x.into_scaled() != 0) else {
+                return Err(ImageError::Unsupported(
+                    UnsupportedError::from_format_and_kind(
+                        ImageFormat::Png.into(),
+                        UnsupportedErrorKind::ColorProfileUnconvertible(
+                            "conversion of cHRM to ICC without gAMA not implemented".to_string(),
+                        ),
+                    ),
+                ));
+            };
+            let Some(chrm) = info.chrm_chunk else {
+                return Err(ImageError::Unsupported(
+                    UnsupportedError::from_format_and_kind(
+                        ImageFormat::Png.into(),
+                        UnsupportedErrorKind::ColorProfileUnconvertible(
+                            "conversion of gAMA to ICC without cHRM not implemented".to_string(),
+                        ),
+                    ),
+                ));
+            };
+
+            let mut profile = moxcms::ColorProfile::new_gray_with_gamma(gama.into_value());
+            profile.color_space = moxcms::DataColorSpace::Rgb;
+            let primaries = moxcms::ColorPrimaries {
+                red: moxcms::Chromaticity::new(chrm.red.0.into_value(), chrm.red.1.into_value()),
+                green: moxcms::Chromaticity::new(
+                    chrm.green.0.into_value(),
+                    chrm.green.1.into_value(),
+                ),
+                blue: moxcms::Chromaticity::new(chrm.blue.0.into_value(), chrm.blue.1.into_value()),
+            };
+            profile.update_rgb_colorimetry(
+                moxcms::Chromaticity::new(chrm.white.0.into_value(), chrm.white.1.into_value())
+                    .to_xyyb(),
+                primaries,
+            );
+
+            let Ok(profile_txt) = profile.encode() else {
+                return Err(ImageError::Unsupported(
+                    UnsupportedError::from_format_and_kind(
+                        ImageFormat::Png.into(),
+                        UnsupportedErrorKind::ColorProfileUnconvertible(
+                            "failed to convert gAMA and cHRM to ICC".to_string(),
+                        ),
+                    ),
+                ));
+            };
+
+            Ok(Some(profile_txt))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn color_profile_to_cicp(&mut self) -> ImageResult<Option<CicpProfile>> {
+        let reader = self.ensure_reader_and_header()?;
+        let info = reader.info();
+
+        // Per PNG v3 sec. 4.3, cICP is the highest priority color chunk
+        if let Some(cicp) = info.coding_independent_code_points {
+            let Ok(primaries) = CicpColorPrimaries::try_from(cicp.color_primaries) else {
+                return Err(ImageError::Decoding(DecodingError::new(
+                    ImageFormat::Png.into(),
+                    format!(
+                        "Failed to decode CICP color primaries value {}",
+                        cicp.color_primaries
+                    ),
+                )));
+            };
+            let Ok(transfer) = CicpTransferCharacteristics::try_from(cicp.transfer_function) else {
+                return Err(ImageError::Decoding(DecodingError::new(
+                    ImageFormat::Png.into(),
+                    format!(
+                        "Failed to decode CICP transfer function value {}",
+                        cicp.transfer_function
+                    ),
+                )));
+            };
+            // See PNG v3 spec 11.3.2.6 on expected matrix coefficient value
+            if cicp.matrix_coefficients != 0 {
+                return Err(ImageError::Decoding(DecodingError::new(
+                    ImageFormat::Png.into(),
+                    "Invalid nonzero matrix coefficients for PNG CICP".to_string(),
+                )));
+            }
+            let full_range = if cicp.is_video_full_range_image {
+                CicpVideoFullRangeFlag::FullRange
+            } else {
+                CicpVideoFullRangeFlag::NarrowRange
+            };
+
+            Ok(Some(CicpProfile::from_sdr_profile(Cicp {
+                primaries,
+                transfer,
+                matrix: CicpMatrixCoefficients::Identity,
+                full_range,
+            })))
+        } else if info.icc_profile.is_some() {
+            Err(ImageError::Unsupported(
+                UnsupportedError::from_format_and_kind(
+                    ImageFormat::Png.into(),
+                    UnsupportedErrorKind::ColorProfileIsICC,
+                ),
+            ))
+        } else if let Some(_intent) = info.srgb {
+            // TODO: the rendering intent is dropped; is it useful in non-ICC workflows,
+            // and should the image even decide?
+            Ok(Some(CicpProfile::from_sdr_profile(Cicp {
+                primaries: CicpColorPrimaries::SRgb,
+                transfer: CicpTransferCharacteristics::SRgb,
+                matrix: CicpMatrixCoefficients::Identity,
+                full_range: CicpVideoFullRangeFlag::FullRange,
+            })))
+        } else if info.gama_chunk.is_some_and(|x| x.into_scaled() != 0) || info.chrm_chunk.is_some()
+        {
+            // NOTE: PNG v3 13.13, Decoder gamma handling, recommends ignoring 0 gAMA as erroneous
+            let is_gamma22 = info.gama_chunk.is_some_and(|x| x.into_scaled() == 45455);
+            let is_srgb_primaries = info.chrm_chunk
+                == Some(png::SourceChromaticities {
+                    white: (
+                        ScaledFloat::from_scaled(31270),
+                        ScaledFloat::from_scaled(32900),
+                    ),
+                    red: (
+                        ScaledFloat::from_scaled(64000),
+                        ScaledFloat::from_scaled(33000),
+                    ),
+                    green: (
+                        ScaledFloat::from_scaled(30000),
+                        ScaledFloat::from_scaled(60000),
+                    ),
+                    blue: (
+                        ScaledFloat::from_scaled(15000),
+                        ScaledFloat::from_scaled(6000),
+                    ),
+                });
+
+            // Many images have this combination.
+            // TODO: detect other common primaries and gamma=1.0
+            if is_gamma22 && is_srgb_primaries {
+                Ok(Some(CicpProfile::from_sdr_profile(Cicp {
+                    primaries: CicpColorPrimaries::SRgb,
+                    transfer: CicpTransferCharacteristics::Bt470M,
+                    matrix: CicpMatrixCoefficients::Identity,
+                    full_range: CicpVideoFullRangeFlag::FullRange,
+                })))
+            } else {
+                Err(ImageError::Unsupported(
+                    UnsupportedError::from_format_and_kind(
+                        ImageFormat::Png.into(),
+                        UnsupportedErrorKind::ColorProfileUnconvertible(
+                            "conversion of gAMA and cHRM to CICP not implemented".to_string(),
+                        ),
+                    ),
+                ))
+            }
+        } else {
+            Ok(None)
+        }
     }
 
     fn exif_metadata(&mut self) -> ImageResult<Option<Vec<u8>>> {

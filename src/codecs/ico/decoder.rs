@@ -6,6 +6,7 @@ use crate::color::ColorType;
 use crate::error::{
     DecodingError, ImageError, ImageResult, UnsupportedError, UnsupportedErrorKind,
 };
+use crate::io::decoder::CicpProfile;
 use crate::io::image_reader_type::SpecCompliance;
 use crate::io::{
     DecodedAnimationAttributes, DecodedImageAttributes, DecoderPreparedImage, FormatAttributes,
@@ -460,6 +461,20 @@ impl<R: BufRead + Seek> ImageDecoder for IcoDecoder<R> {
         match &mut self.inner_decoder {
             Bmp(decoder) => decoder.icc_profile(),
             Png(decoder) => decoder.icc_profile(),
+        }
+    }
+
+    fn color_profile_to_icc(&mut self) -> ImageResult<Option<Vec<u8>>> {
+        match &mut self.inner_decoder {
+            Bmp(decoder) => decoder.color_profile_to_icc(),
+            Png(decoder) => decoder.color_profile_to_icc(),
+        }
+    }
+
+    fn color_profile_to_cicp(&mut self) -> ImageResult<Option<CicpProfile>> {
+        match &mut self.inner_decoder {
+            Bmp(decoder) => decoder.color_profile_to_cicp(),
+            Png(decoder) => decoder.color_profile_to_cicp(),
         }
     }
 

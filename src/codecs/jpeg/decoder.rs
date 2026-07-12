@@ -4,7 +4,7 @@ use crate::color::ColorType;
 use crate::error::{
     DecodingError, ImageError, ImageResult, LimitError, UnsupportedError, UnsupportedErrorKind,
 };
-use crate::io::decoder::DecodedMetadataHint;
+use crate::io::decoder::{CicpProfile, DecodedMetadataHint};
 use crate::io::image_reader_type::SpecCompliance;
 use crate::io::{DecodedImageAttributes, DecoderPreparedImage, FormatAttributes};
 use crate::{ImageDecoder, ImageFormat, Limits};
@@ -107,6 +107,7 @@ impl<R: BufRead + Seek> ImageDecoder for JpegDecoder<R> {
             // our methods currently seek of their own accord anyways, it's just important to
             // uphold this if we do not buffer the whole file.
             icc: DecodedMetadataHint::InHeader,
+            color_profile: DecodedMetadataHint::InHeader,
             exif: DecodedMetadataHint::InHeader,
             xmp: DecodedMetadataHint::InHeader,
             iptc: DecodedMetadataHint::InHeader,
@@ -126,6 +127,23 @@ impl<R: BufRead + Seek> ImageDecoder for JpegDecoder<R> {
     fn icc_profile(&mut self) -> ImageResult<Option<Vec<u8>>> {
         let (decoder, _) = self.ensure_headers()?;
         Ok(decoder.icc_profile())
+    }
+
+    fn color_profile_to_icc(&mut self) -> ImageResult<Option<Vec<u8>>> {
+        self.icc_profile()
+    }
+
+    fn color_profile_to_cicp(&mut self) -> ImageResult<Option<CicpProfile>> {
+        if self.icc_profile()?.is_some() {
+            Err(ImageError::Unsupported(
+                UnsupportedError::from_format_and_kind(
+                    ImageFormat::Jpeg.into(),
+                    UnsupportedErrorKind::ColorProfileIsICC,
+                ),
+            ))
+        } else {
+            Ok(None)
+        }
     }
 
     fn exif_metadata(&mut self) -> ImageResult<Option<Vec<u8>>> {

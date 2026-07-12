@@ -1,4 +1,9 @@
-use crate::io::DecoderPreparedImage;
+use crate::io::decoder::CicpProfile;
+use crate::io::{DecodedMetadataHint, DecoderPreparedImage, FormatAttributes};
+use crate::metadata::{
+    Cicp, CicpColorPrimaries, CicpMatrixCoefficients, CicpTransferCharacteristics,
+    CicpVideoFullRangeFlag,
+};
 use crate::utils::vec_try_with_capacity;
 use std::cmp::{self, Ordering};
 use std::io::{self, BufRead, Seek, SeekFrom};
@@ -2428,6 +2433,14 @@ impl<R: BufRead + Seek> BmpDecoder<R> {
 }
 
 impl<R: BufRead + Seek> ImageDecoder for BmpDecoder<R> {
+    fn format_attributes(&self) -> FormatAttributes {
+        FormatAttributes {
+            icc: DecodedMetadataHint::InHeader,
+            color_profile: DecodedMetadataHint::InHeader,
+            ..FormatAttributes::default()
+        }
+    }
+
     fn prepare_image(&mut self) -> ImageResult<DecoderPreparedImage> {
         let color = if self.indexed_color {
             ColorType::L8
@@ -2445,6 +2458,10 @@ impl<R: BufRead + Seek> ImageDecoder for BmpDecoder<R> {
     }
 
     fn icc_profile(&mut self) -> ImageResult<Option<Vec<u8>>> {
+        Ok(self.icc_profile.clone())
+    }
+
+    fn color_profile_to_icc(&mut self) -> ImageResult<Option<Vec<u8>>> {
         match self.color_space_info {
             Some(ColorSpaceInfo::CalibratedRgb(params)) => {
                 // Synthesize an ICC profile from the calibrated RGB parameters
@@ -2462,6 +2479,35 @@ impl<R: BufRead + Seek> ImageDecoder for BmpDecoder<R> {
             // LCS_sRGB / LCS_WINDOWS_COLOR_SPACE: the caller treats
             // "no ICC profile" as sRGB, so nothing to store.
             Some(ColorSpaceInfo::Srgb) | None => Ok(None),
+        }
+    }
+
+    fn color_profile_to_cicp(&mut self) -> ImageResult<Option<CicpProfile>> {
+        match self.color_space_info {
+            Some(ColorSpaceInfo::CalibratedRgb(_)) => {
+                // TODO: detect standard color primaries + gamma
+                Err(ImageError::Unsupported(
+                    UnsupportedError::from_format_and_kind(
+                        ImageFormat::Bmp.into(),
+                        UnsupportedErrorKind::ColorProfileUnconvertible(
+                            "calibrated Rgb to CICP not implemented".to_string(),
+                        ),
+                    ),
+                ))
+            }
+            Some(ColorSpaceInfo::EmbeddedIcc(_)) => Err(ImageError::Unsupported(
+                UnsupportedError::from_format_and_kind(
+                    ImageFormat::Bmp.into(),
+                    UnsupportedErrorKind::ColorProfileIsICC,
+                ),
+            )),
+            Some(ColorSpaceInfo::Srgb) => Ok(Some(CicpProfile::from_sdr_profile(Cicp {
+                primaries: CicpColorPrimaries::SRgb,
+                transfer: CicpTransferCharacteristics::SRgb,
+                matrix: CicpMatrixCoefficients::Identity,
+                full_range: CicpVideoFullRangeFlag::FullRange,
+            }))),
+            None => Ok(None),
         }
     }
 
@@ -2588,6 +2634,7 @@ mod test {
         let mut decoder = BmpDecoder::new(f).unwrap();
         let profile = decoder.icc_profile().unwrap();
         assert!(profile.is_some());
+        assert!(profile == decoder.color_profile_to_icc().unwrap());
         let profile_data = profile.unwrap();
         assert_eq!(profile_data.len(), 3048);
         validate_icc_profile(
@@ -2602,6 +2649,7 @@ mod test {
         let mut decoder = BmpDecoder::new(f).unwrap();
         let profile = decoder.icc_profile().unwrap();
         assert!(profile.is_some());
+        assert!(profile == decoder.color_profile_to_icc().unwrap());
         let profile_data = profile.unwrap();
         assert_eq!(profile_data.len(), 540);
         validate_icc_profile(
@@ -2617,7 +2665,7 @@ mod test {
         // pal8v4.bmp has a V4 header with LCS_CALIBRATED_RGB — should synthesize an ICC profile.
         let data = std::fs::read("tests/images/bmp/images/pal8v4.bmp").unwrap();
         let mut decoder = BmpDecoder::new(Cursor::new(&data)).unwrap();
-        let profile = decoder.icc_profile().unwrap();
+        let profile = decoder.color_profile_to_icc().unwrap();
         assert!(
             profile.is_some(),
             "pal8v4: should have a synthesized ICC profile from calibrated RGB parameters"

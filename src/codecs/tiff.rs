@@ -16,7 +16,7 @@ use crate::error::{
     DecodingError, EncodingError, ImageError, ImageResult, LimitError, LimitErrorKind,
     ParameterError, ParameterErrorKind, UnsupportedError, UnsupportedErrorKind,
 };
-use crate::io::decoder::DecodedMetadataHint;
+use crate::io::decoder::{CicpProfile, DecodedMetadataHint};
 use crate::io::{DecodedImageAttributes, DecoderPreparedImage, FormatAttributes};
 use crate::metadata::Orientation;
 use crate::{utils, ImageDecoder, ImageEncoder, ImageFormat};
@@ -386,6 +386,7 @@ impl<R: BufRead + Seek> ImageDecoder for TiffDecoder<R> {
             // is any sort of iTXT chunk.
             xmp: DecodedMetadataHint::PerImage,
             icc: DecodedMetadataHint::PerImage,
+            color_profile: DecodedMetadataHint::PerImage,
             exif: DecodedMetadataHint::PerImage,
             // not provided above.
             iptc: DecodedMetadataHint::Unsupported,
@@ -404,6 +405,23 @@ impl<R: BufRead + Seek> ImageDecoder for TiffDecoder<R> {
     fn icc_profile(&mut self) -> ImageResult<Option<Vec<u8>>> {
         if let Some(decoder) = &mut self.inner {
             Ok(decoder.get_tag_u8_vec(Tag::IccProfile).ok())
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn color_profile_to_icc(&mut self) -> ImageResult<Option<Vec<u8>>> {
+        self.icc_profile()
+    }
+
+    fn color_profile_to_cicp(&mut self) -> ImageResult<Option<CicpProfile>> {
+        if self.icc_profile()?.is_some() {
+            Err(ImageError::Unsupported(
+                UnsupportedError::from_format_and_kind(
+                    ImageFormat::Tiff.into(),
+                    UnsupportedErrorKind::ColorProfileIsICC,
+                ),
+            ))
         } else {
             Ok(None)
         }
