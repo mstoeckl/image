@@ -1,6 +1,6 @@
 use crate::error::ImageResult;
 use crate::io::DecoderPreparedImage;
-use crate::metadata::{LoopCount, Orientation};
+use crate::metadata::{Cicp, LoopCount, Orientation};
 use crate::Delay;
 
 /// The interface for `image` to utilize in reading image files.
@@ -17,7 +17,7 @@ use crate::Delay;
 ///
 /// configure = "set_limits"
 ///
-/// metadata = "xmp_metadata" | "icc_profile" | "exif_metadata" | "iptc_metadata"
+/// metadata = "xmp_metadata" | "icc_profile" | "exif_metadata" | "iptc_metadata" | "color_profile_to_cicp" | "color_profile_to_icc"
 /// ```
 ///
 /// Deviation from this order can be treated as an error. Future changes to the protocol may
@@ -115,14 +115,58 @@ pub trait ImageDecoder {
 
     /// Returns the ICC color profile embedded in the image, or `Ok(None)` if the image does not have one.
     ///
-    /// For formats that don't support embedded profiles this function should always return
-    /// `Ok(None)`. Decoders for formats with non-standard color profiles may create a synthetic
+    /// Note that this function returning a profile does not imply the image actually
+    /// uses the profile. Some formats allow embedding but not using ICC profiles.
+    ///
+    /// Use [`ImageDecoder::color_profile_to_icc`] to determine whether the color profile
+    /// that applies to the image contents can be expressed in ICC format.
+    fn icc_profile(&mut self) -> ImageResult<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    /// Returns the color profile information of the image, translated into an ICC profile
+    /// if possible; or Ok(None) if the image has _no_ color profile information.
+    ///
+    /// Decoders for formats with non-standard color profiles may create a synthetic
     /// profile, see our [`bmp`](`crate::codecs::bmp`) module for an example.
     ///
-    /// A decoder that encounters tags which contain a color profile whose encoding it does not
-    /// support should return [`UnsupportedError`](`crate::error::UnsupportedError`). This allows a
+    /// If the color profile information of the image can not be expressed using an ICC
+    /// profile (which could easily occur for images with HDR metadata), or if
+    /// the decoder simply has not implemented conversion logic for it, this returns
+    /// [`UnsupportedError`](`crate::error::UnsupportedError`). This allows a reader
+    /// to continue while differentiating from missing metadata.
+    ///
+    /// In particular, if an image's color profile is best expressed using CICP, a decoder
+    /// may return [`UnsupportedError`](`crate::error::UnsupportedError`), expecting the
+    /// reader to check [`ImageDecoder::color_profile_to_cicp`] instead and deferring the
+    /// CICP to ICC conversion problem to the reader.
+    ///
+    /// In the event that both this function and [`ImageDecoder::color_profile_to_cicp`]
+    /// do not return [`UnsupportedError`](`crate::error::UnsupportedError`), the returned
+    /// color profile informations should be consistent with each other.
+    fn color_profile_to_icc(&mut self) -> ImageResult<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    /// Returns the color profile information of the image, translated into CICP values
+    /// and associated metadata if possible. If the image is missing any color metadata
+    /// this will return Ok(None).
+    ///
+    /// If the color profile information of the image can not be expressed using CICP
+    /// values (which could easily occur for images with custom primaries, or using
+    /// ICC profiles), or if the decoder simply has not implemented conversion logic for it,
+    /// this returns [`UnsupportedError`](`crate::error::UnsupportedError`). This allows a
     /// reader to continue while differentiating from missing metadata.
-    fn icc_profile(&mut self) -> ImageResult<Option<Vec<u8>>> {
+    ///
+    /// In particular, if an image's color profile is best expressed using ICC, a decoder
+    /// may return [`UnsupportedError`](`crate::error::UnsupportedError`), expecting the
+    /// reader to check [`ImageDecoder::color_profile_to_icc`] instead and deferring the
+    /// ICC to CICP conversion problem to the reader.
+    ///
+    /// In the event that both this function and [`ImageDecoder::color_profile_to_icc`]
+    /// do not return [`UnsupportedError`](`crate::error::UnsupportedError`), the returned
+    /// color profile informations should be consistent with each other.
+    fn color_profile_to_cicp(&mut self) -> ImageResult<Option<CicpProfile>> {
         Ok(None)
     }
 
@@ -186,6 +230,8 @@ pub struct FormatAttributes {
     pub supports_sequence: bool,
     /// When should ICC profiles be retrieved.
     pub icc: DecodedMetadataHint,
+    /// When should the color profile information be retrieved.
+    pub color_profile: DecodedMetadataHint,
     /// A hint for polling EXIF metadata.
     pub exif: DecodedMetadataHint,
     /// A hint for polling XMP metadata.
@@ -234,6 +280,31 @@ pub struct DecodedImageAttributes {
     /// [`color`][`crate::ImageLayout::color`] field, you do not need to time travel this
     /// information.
     pub original_color_type: Option<crate::ExtendedColorType>,
+}
+
+/// Color profile information based on coding independent code points (see [`Cicp`])
+/// and additional HDR tone mapping parameters.
+///
+/// This is an alternative system to ICC-profile based mapping of colors from the
+/// image's numerical values to whatever space the user has. HDR continues to be
+/// actively standardized so new properties may be added to this struct over time
+/// as image formats add them.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct CicpProfile {
+    /// The main image color properties.
+    pub cicp: Cicp,
+    // TODO: add the optional auxiliary properties needed to tone-map the input
+    // like maxCLL, maxFALL, mastering display color primaries, etc. Which
+    // actually is needed may depend on the transfer function and context.
+}
+
+impl CicpProfile {
+    /// Create a CicpProfile with only the CICP parameters set and all
+    /// other fields defaulted
+    pub fn from_sdr_profile(cicp: Cicp) -> Self {
+        CicpProfile { cicp }
+    }
 }
 
 /// A hint when metadata corresponding to the image is decoded.
@@ -302,6 +373,12 @@ impl<T: ?Sized + ImageDecoder> ImageDecoder for Box<T> {
     }
     fn icc_profile(&mut self) -> ImageResult<Option<Vec<u8>>> {
         (**self).icc_profile()
+    }
+    fn color_profile_to_icc(&mut self) -> ImageResult<Option<Vec<u8>>> {
+        (**self).color_profile_to_icc()
+    }
+    fn color_profile_to_cicp(&mut self) -> ImageResult<Option<CicpProfile>> {
+        (**self).color_profile_to_cicp()
     }
     fn exif_metadata(&mut self) -> ImageResult<Option<Vec<u8>>> {
         (**self).exif_metadata()
